@@ -1389,8 +1389,6 @@ const ALIPAY_QR_URI: &str = "bytes://leidao-alipay-qr.png";
 const ALIPAY_QR_BYTES: &[u8] = include_bytes!("../assets/support/leidao-alipay-qr.png");
 
 fn support_author(ui: &mut egui::Ui, pending: &mut Vec<Cmd>) {
-    let id = egui::Id::new("support-author-open");
-    let open = ui.ctx().data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let mut controls = |ui: &mut egui::Ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label("维护者微信");
@@ -1400,16 +1398,6 @@ fn support_author(ui: &mut egui::Ui, pending: &mut Vec<Cmd>) {
             }
         });
 
-        let button = egui::Button::new(
-            egui::RichText::new(if open { "收起赞助码" } else { "显示支付宝赞助码" })
-                .color(Color32::from_rgb(33, 27, 51)),
-        )
-        .fill(Color32::from_rgb(182, 163, 245))
-        .corner_radius(8.0);
-        if ui.add_sized([ui.available_width(), 32.0], button).clicked() {
-            ui.ctx().data_mut(|data| data.insert_temp(id, !open));
-            ui.ctx().request_repaint();
-        }
         ui.label(
             egui::RichText::new("自愿赞助，不影响功能使用")
                 .size(12.0)
@@ -1427,19 +1415,15 @@ fn support_author(ui: &mut egui::Ui, pending: &mut Vec<Cmd>) {
             );
         });
     };
-    if open && ui.available_width() >= 380.0 {
+    if ui.available_width() >= 280.0 {
         ui.columns(2, |columns| {
             controls(&mut columns[0]);
             scan_code(&mut columns[1]);
         });
     } else {
         controls(ui);
-        if open {
-            ui.add_space(4.0);
-            scan_code(ui);
-        } else {
-            release_support_codes(ui.ctx());
-        }
+        ui.add_space(4.0);
+        scan_code(ui);
     }
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
@@ -1549,7 +1533,7 @@ fn settings_capture(ctx:&egui::Context)->Option<usize>{
 
 impl App {
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
-        if !self.settings_open{self.window_layout().close();release_support_codes(ctx);self.weather_source.close();}
+        if !self.settings_open{self.window_layout().close();ctx.forget_image(ALIPAY_QR_URI);self.weather_source.close();}
         self.updates.poll(ctx);
         self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
@@ -2327,8 +2311,4 @@ impl App {
         });
         if !self.settings_open{self.window_layout().close();self.weather_source.close();}else{self.weather_tutorial_ui(ctx);}
     }
-}
-
-fn release_support_codes(ctx: &egui::Context) {
-    ctx.forget_image(ALIPAY_QR_URI);
 }

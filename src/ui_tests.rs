@@ -7446,28 +7446,26 @@ fn about_support_preview() {
         *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
     });
     let mut raster=crate::preview_raster::Raster::new(690,560);
-    for dark in [true,false] { for open in [false,true] {
+    for dark in [true,false] {
         h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
-        h.ctx.data_mut(|data|data.insert_temp(egui::Id::new("support-author-open"),open));
         for frame in 0..4 {
             let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
             let child=output.lock().unwrap().take().unwrap();
             raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
             if frame==3 {
-                let has_scan_hint=child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="打开支付宝扫一扫"));
-                assert_eq!(has_scan_hint,open);
-                for label in ["维护者微信", "复制微信号", if open{"收起赞助码"}else{"显示支付宝赞助码"},"自愿赞助，不影响功能使用"] {
+                assert!(!child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if matches!(text.galley.text(),"显示支付宝赞助码"|"收起赞助码"))));
+                for label in ["维护者微信", "复制微信号", "打开支付宝扫一扫", "自愿赞助，不影响功能使用"] {
                     let shape=child.shapes.iter().find(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)).expect("按钮和说明必须可见");
                     assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"默认窗口中内容不能被裁切：{label}");
                 }
                 raster.buf.fill([0.0,0.0,0.0,1.0]);
                 raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
                 let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join(format!("about-{}-{}.png",if dark{"dark"}else{"light"},if open{"open"}else{"closed"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
+                image::save_buffer(dest.join(if dark{"about-dark.png"}else{"about-light.png"}),&rgba,690,560,image::ColorType::Rgba8).unwrap();
             }
             raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
         }
-    } }
+    }
 }
 
 
