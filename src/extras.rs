@@ -1366,11 +1366,13 @@ pub(crate) fn settings_hint(ui:&mut egui::Ui,text:&str){
     ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(160),Color32::from_gray(105)))).wrap());
 }
 pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
-    let ctx=&ui.ctx().clone();
+    settings_card_frame(ui.ctx()).show(ui,|ui|{ui.set_min_width(ui.available_width());add(ui);});
+}
+
+fn settings_card_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(35,35,38),Color32::from_rgb(255,255,255)))
         .stroke(egui::Stroke::new(1.0_f32,settings_color(ctx,Color32::from_rgb(55,58,64),Color32::from_rgb(230,233,238))))
         .corner_radius(10.0).inner_margin(egui::Margin::symmetric(18,16))
-        .show(ui,|ui|{ui.set_min_width(ui.available_width());add(ui);});
 }
 /// 设置分页对应的功能模块（页面序号）；常规、通知、关于、页面管理不属于任何模块。
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
@@ -1385,11 +1387,33 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.add_space(2.0);
 }
 const MAINTAINER_WECHAT: &str = "Mr_Lei0620";
+const SUPPORT_ART_URI: &str = "bytes://midnight-coffee.png";
+const SUPPORT_ART_BYTES: &[u8] = include_bytes!("../assets/support/midnight-coffee.png");
 const ALIPAY_QR_URI: &str = "bytes://leidao-alipay-qr.png";
 const ALIPAY_QR_BYTES: &[u8] = include_bytes!("../assets/support/leidao-alipay-qr.png");
 
 fn support_author(ui: &mut egui::Ui, pending: &mut Vec<Cmd>) {
+    let accent = settings_color(ui.ctx(), Color32::from_rgb(245, 193, 139), Color32::from_rgb(132, 73, 37));
+    let background = settings_color(ui.ctx(), Color32::from_rgb(43, 36, 32), Color32::from_rgb(255, 249, 241));
+    let border = settings_color(ui.ctx(), Color32::from_rgb(83, 65, 53), Color32::from_rgb(239, 221, 201));
     let mut controls = |ui: &mut egui::Ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let illustration_width = (ui.available_width() * 0.38).clamp(52.0, 88.0);
+        ui.horizontal(|ui| {
+            // Display the illustration with its original alpha and less transparent padding.
+            ui.add(
+                egui::Image::from_bytes(SUPPORT_ART_URI, SUPPORT_ART_BYTES)
+                    .fit_to_exact_size(egui::vec2(illustration_width, illustration_width * 0.87))
+                    .maintain_aspect_ratio(false)
+                    .uv(egui::Rect::from_min_max(egui::pos2(0.20, 0.035), egui::pos2(0.79, 0.965)))
+                    .alt_text("熬夜咖啡插画"),
+            );
+            ui.add(egui::Label::new(egui::RichText::new("请喝一杯\n续命熬夜咖啡").size(18.0).strong()).wrap());
+        });
+        ui.add_space(3.0);
+        ui.add(egui::Label::new("咖啡续上，代码接着写。").wrap());
+        ui.add(egui::Label::new(egui::RichText::new("自愿赞助，不限金额").color(accent)).wrap());
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.label("维护者微信");
             ui.label(MAINTAINER_WECHAT);
@@ -1397,34 +1421,36 @@ fn support_author(ui: &mut egui::Ui, pending: &mut Vec<Cmd>) {
                 pending.push(Cmd::Copy(MAINTAINER_WECHAT.into()));
             }
         });
-
-        ui.label(
-            egui::RichText::new("自愿赞助，不影响功能使用")
-                .size(12.0)
-                .color(ui.visuals().weak_text_color()),
-        );
     };
     let scan_code = |ui: &mut egui::Ui| {
-        let side = ui.available_width().min(180.0);
+        let side = ui.available_width().min(168.0);
         ui.vertical_centered(|ui| {
-            ui.label("打开支付宝扫一扫");
             ui.add(
                 egui::Image::from_bytes(ALIPAY_QR_URI, ALIPAY_QR_BYTES)
                     .fit_to_exact_size(egui::vec2(side, side))
+                    .corner_radius(10.0)
                     .alt_text("支付宝赞助收款码"),
             );
+            ui.label(egui::RichText::new("支付宝扫一扫").size(12.0).color(accent));
         });
     };
-    if ui.available_width() >= 280.0 {
-        ui.columns(2, |columns| {
-            controls(&mut columns[0]);
-            scan_code(&mut columns[1]);
+    settings_card_frame(ui.ctx())
+        .fill(background)
+        .stroke(egui::Stroke::new(1.0_f32, border))
+        .inner_margin(egui::Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if ui.available_width() >= 280.0 {
+                ui.columns(2, |columns| {
+                    controls(&mut columns[0]);
+                    scan_code(&mut columns[1]);
+                });
+            } else {
+                controls(ui);
+                ui.add_space(4.0);
+                scan_code(ui);
+            }
         });
-    } else {
-        controls(ui);
-        ui.add_space(4.0);
-        scan_code(ui);
-    }
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
     ui.horizontal(|ui|{
@@ -1533,7 +1559,12 @@ fn settings_capture(ctx:&egui::Context)->Option<usize>{
 
 impl App {
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
-        if !self.settings_open{self.window_layout().close();ctx.forget_image(ALIPAY_QR_URI);self.weather_source.close();}
+        if !self.settings_open{
+            self.window_layout().close();
+            ctx.forget_image(ALIPAY_QR_URI);
+            ctx.forget_image(SUPPORT_ART_URI);
+            self.weather_source.close();
+        }
         self.updates.poll(ctx);
         self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
@@ -2300,7 +2331,7 @@ impl App {
                             });
                         });
                         settings_label(ui,"联系与赞助");
-                        settings_card(ui,|ui|support_author(ui,&mut self.pending));
+                        support_author(ui,&mut self.pending);
                     }
                     }
                 });

@@ -7454,7 +7454,7 @@ fn about_support_preview() {
             raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
             if frame==3 {
                 assert!(!child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if matches!(text.galley.text(),"显示支付宝赞助码"|"收起赞助码"))));
-                for label in ["维护者微信", "复制微信号", "打开支付宝扫一扫", "自愿赞助，不影响功能使用"] {
+                for label in ["请喝一杯\n续命熬夜咖啡", "咖啡续上，代码接着写。", "自愿赞助，不限金额", "维护者微信", "复制微信号", "支付宝扫一扫"] {
                     let shape=child.shapes.iter().find(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)).expect("按钮和说明必须可见");
                     assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"默认窗口中内容不能被裁切：{label}");
                 }

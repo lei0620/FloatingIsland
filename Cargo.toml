@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.67"
+version = "0.6.68"
 edition = "2021"
 license-file = "LICENSE-FLOATING-ISLAND.md"
 description = "浮岛：Windows 桌面助手"

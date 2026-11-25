@@ -3,12 +3,19 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 $oldFlags = $env:CARGO_ENCODED_RUSTFLAGS
+$oldCFlags = $env:CFLAGS_x86_64_pc_windows_msvc
+$oldEscapedFlags = $env:CC_SHELL_ESCAPED_FLAGS
 try {
     $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"]+)"').Groups[1].Value
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Leidao 正式版需要三段数字版本号。' }
     if (!$SkipBuild) {
         $cargoHome = if ($env:CARGO_HOME) {$env:CARGO_HOME} else {Join-Path $env:USERPROFILE '.cargo'}
         $env:CARGO_ENCODED_RUSTFLAGS = @('-C','target-feature=+crt-static',"--remap-path-prefix=$cargoHome=cargo", "--remap-path-prefix=$projectRoot=leidao",'-C','link-arg=/PDBALTPATH:%_PDB%') -join [char]0x1f
+        # QuickJS sets CFLAGS itself. Pass the trim option through cc's target-specific flags.
+        $trimFlag = '/d1trimfile:' + $projectRoot
+        $quotedTrimFlag = "'" + $trimFlag.Replace("'", "'\''") + "'"
+        $env:CC_SHELL_ESCAPED_FLAGS = '1'
+        $env:CFLAGS_x86_64_pc_windows_msvc = "$oldCFlags $quotedTrimFlag".Trim()
         cargo build --locked --release --bin daozai
         if ($LASTEXITCODE -ne 0) { throw 'Leidao 构建失败。' }
     }
@@ -17,8 +24,23 @@ try {
     & (Join-Path $PSScriptRoot 'check-runtime.ps1') -Executable $binary.FullName
     if (($binary.VersionInfo.FileVersion -ne $version -and $binary.VersionInfo.FileVersion -ne "$version.0") -or $binary.VersionInfo.ProductName -ne 'Leidao') { throw '程序版本或产品不匹配。' }
     if (!$SkipBuild) {
-        $content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($binary.FullName))
-        foreach ($private in @($env:USERPROFILE,$projectRoot)) { if ($private -and $content.Contains($private)) { throw '发布程序包含本机构建路径。' } }
+        $bytes = [IO.File]::ReadAllBytes($binary.FullName)
+        $privatePaths = @($env:USERPROFILE, $projectRoot) | Where-Object { $_ } | ForEach-Object {
+            $_.Replace('/','\')
+            $_.Replace('\','/')
+        }
+        $contents = @(
+            [Text.Encoding]::UTF8.GetString($bytes)
+            [Text.Encoding]::Unicode.GetString($bytes)
+            [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+        )
+        foreach ($content in $contents) {
+            foreach ($path in $privatePaths) {
+                if ($content.IndexOf($path,[StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    throw '发布程序包含本机构建路径。'
+                }
+            }
+        }
     }
     if (!$OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'dist' }
     $output = [IO.Path]::GetFullPath($OutputDirectory)
@@ -42,5 +64,7 @@ try {
     Write-Output $archive
 } finally {
     $env:CARGO_ENCODED_RUSTFLAGS = $oldFlags
+    $env:CFLAGS_x86_64_pc_windows_msvc = $oldCFlags
+    $env:CC_SHELL_ESCAPED_FLAGS = $oldEscapedFlags
     Pop-Location
 }
