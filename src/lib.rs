@@ -53,6 +53,7 @@ mod config_sync_ui;
 mod sedentary;
 pub mod otp;
 pub mod quota;
+mod quota_http;
 mod quota_ui;
 pub mod weather;
 mod weather_ui;

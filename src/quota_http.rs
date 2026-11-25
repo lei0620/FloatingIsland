@@ -19,11 +19,14 @@ pub(super) struct HttpAgent {
     resolve: fn(&str) -> Option<String>,
     proxies: Mutex<HashMap<String, ureq::Agent>>,
     connect_timeout: Duration,
+    streaming: bool,
 }
 
-fn build_agent(proxy: Option<&str>, connect_timeout: Duration) -> ureq::Agent {
+fn build_agent(proxy: Option<&str>, connect_timeout: Duration, streaming: bool) -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new().try_proxy_from_env(false)
-        .timeout(Duration::from_secs(15)).timeout_connect(connect_timeout).redirects(0);
+        .timeout_connect(connect_timeout).redirects(0);
+    let timeout = Duration::from_secs(15);
+    builder = if streaming { builder.timeout_read(timeout).timeout_write(timeout) } else { builder.timeout(timeout) };
     if let Some(proxy) = proxy.and_then(|value| ureq::Proxy::new(value).ok()) {
         builder = builder.proxy(proxy);
     }
@@ -36,18 +39,26 @@ impl HttpAgent {
     }
 
     pub(super) fn with_connect_timeout(connect_timeout: Duration) -> Self {
+        Self::from_environment(connect_timeout, false)
+    }
+
+    pub(super) fn streaming() -> Self {
+        Self::from_environment(Duration::from_secs(15), true)
+    }
+
+    fn from_environment(connect_timeout: Duration, streaming: bool) -> Self {
         let proxy = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]
             .iter().find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()));
-        Self::with_proxy_and_timeout(proxy, connect_timeout)
+        Self::with_proxy_and_timeout(proxy, connect_timeout, streaming)
     }
 
     fn with_environment_proxy(proxy: Option<String>) -> Self {
-        Self::with_proxy_and_timeout(proxy, Duration::from_secs(30))
+        Self::with_proxy_and_timeout(proxy, Duration::from_secs(30), false)
     }
 
-    fn with_proxy_and_timeout(proxy: Option<String>, connect_timeout: Duration) -> Self {
-        Self { default: build_agent(proxy.as_deref(), connect_timeout), automatic: proxy.is_none(),
-            resolve: system_proxy, proxies: Mutex::new(HashMap::new()), connect_timeout }
+    fn with_proxy_and_timeout(proxy: Option<String>, connect_timeout: Duration, streaming: bool) -> Self {
+        Self { default: build_agent(proxy.as_deref(), connect_timeout, streaming), automatic: proxy.is_none(),
+            resolve: system_proxy, proxies: Mutex::new(HashMap::new()), connect_timeout, streaming }
     }
 }
 
@@ -56,7 +67,7 @@ impl HttpClient for HttpAgent {
         if self.automatic {
             if let Some(proxy) = (self.resolve)(url) {
                 let mut agents = self.proxies.lock().unwrap_or_else(|error| error.into_inner());
-                return agents.entry(proxy.clone()).or_insert_with(|| build_agent(Some(&proxy), self.connect_timeout)).request(method, url);
+                return agents.entry(proxy.clone()).or_insert_with(|| build_agent(Some(&proxy), self.connect_timeout, self.streaming)).request(method, url);
             }
         }
         self.default.request(method, url)

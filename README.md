@@ -4,6 +4,12 @@
 
 项目基于[岛仔](https://github.com/Renly1994/xiaotang-daozai)二次开发。浮岛原名 Leidao，已有安装入口和配置可继续使用。
 
+## 下载安装
+
+在[发布页](https://github.com/lei0620/FloatingIsland/releases/latest)下载 `FloatingIsland-v版本号-windows-x64.zip`，完整解压后运行 `Leidao.exe`。支持 64 位 Windows 10 和 Windows 11。
+
+在「设置 → 关于 → 检查更新」可以直接检查并下载公开更新，无需 GitHub 账号或 GitHub CLI。原私有更新渠道的用户可以从旧版检查并升级到此版本。手动更新已有安装时，先退出程序，把 ZIP 中的两个 EXE 一起覆盖到原安装目录，沿用原数据目录和设置。
+
 ## 从源码运行
 
 安装 Rust stable（MSVC）、Visual Studio C++ 生成工具和 Windows SDK，然后在仓库根目录运行：
@@ -13,7 +19,7 @@ cargo build --locked --release --bin daozai
 ./target/release/daozai.exe
 ```
 
-在设置里按需连接自己的邮件和 WebDAV 账号。WebDAV 可指定存储目录，连接时会尝试创建缺失的目录。WebDAV 应用密码由 Windows 凭据管理器保存。本仓库提供源码，已有的程序更新渠道仍需相应仓库访问权限。
+在设置里按需连接自己的邮件和 WebDAV 账号。WebDAV 可指定存储目录，连接时会尝试创建缺失的目录。WebDAV 应用密码由 Windows 凭据管理器保存。
 
 ## 许可
 

@@ -1,17 +1,18 @@
 //! 自动检查正式版更新，下载与安装由用户确认。
 use eframe::egui;
 use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use crate::quota_http::{HttpAgent, HttpClient};
 
-const REPOSITORY: &str = "https://github.com/lei0620/Leidao";
-const API_REPOSITORY: &str = "repos/lei0620/Leidao";
-const RELEASES: &str = "https://github.com/lei0620/Leidao/releases";
+const REPOSITORY: &str = "https://github.com/lei0620/FloatingIsland";
+const RELEASES: &str = "https://github.com/lei0620/FloatingIsland/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/lei0620/FloatingIsland/releases?per_page=100";
 const UPDATE_WINDOW_TITLE: &str = "浮岛 更新";
-const TAG_PREFIX: &str = "leidao-v";
+const TAG_PREFIX: &str = "v";
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
 #[derive(Clone, Debug)]
-struct Package { asset_id: u64, size: u64, hash: String }
+struct Package { url: String, size: u64, hash: String }
 enum Event { Checked(Result<Option<Release>, String>), Progress(f32), Ready(PathBuf), Installed, Failed(String) }
 
 #[derive(Default)]
@@ -330,59 +331,53 @@ unsafe fn update_window_region(rect: egui::Rect, scale: f32) -> windows::Win32::
     )
 }
 
-// Delegate authentication to GitHub CLI; never read or embed credentials.
-fn run_command<T: Send + 'static>(mut command: std::process::Command, cancel: Arc<AtomicBool>, timeout: Duration,
-    read: impl FnOnce(std::process::ChildStdout) -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    use std::process::Stdio;
-    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| "无法启动 GitHub CLI，请安装 gh 并登录有权访问浮岛更新仓库的账号".to_owned())?;
-    let stdout = child.stdout.take().ok_or("无法读取更新服务响应")?;
-    let worker = std::thread::spawn(move || read(stdout));
-    let started = std::time::Instant::now();
-    let status = loop {
-        if cancel.load(Ordering::Relaxed) || started.elapsed() >= timeout {
-            let _ = child.kill(); let _ = child.wait(); let _ = worker.join();
-            return Err(if cancel.load(Ordering::Relaxed) { "下载已取消" } else { "更新服务等待超时，请重试" }.into());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => { let _ = child.kill(); let _ = child.wait(); let _ = worker.join(); return Err("更新服务已中断".into()); }
-        }
-    };
-    let result = worker.join().map_err(|_| "更新服务已中断".to_owned())?;
-    if !status.success() { return Err("无法访问浮岛发布，请确认 gh 已登录有仓库访问权限的账号，并检查网络".into()); }
-    result
-}
-
-fn github_command(endpoint: &str, binary: bool) -> std::process::Command {
-    // GUI processes also need the existing URL-specific Windows PAC resolution.
-    let proxy = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]
-        .iter().find_map(|key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()))
-        .or_else(|| crate::quota::proxy_for_url("https://api.github.com"));
-    github_command_with_proxy(endpoint, binary, proxy.as_deref())
-}
-
-fn github_command_with_proxy(endpoint: &str, binary: bool, proxy: Option<&str>) -> std::process::Command {
-    let mut command = std::process::Command::new("gh");
-    command.args(["api", "--hostname", "github.com", endpoint, "-H",
-        if binary { "Accept: application/octet-stream" } else { "Accept: application/vnd.github+json" }]);
-    command.env("GH_PROMPT_DISABLED", "1").env("GH_NO_UPDATE_NOTIFIER", "1");
-    if let Some(proxy) = proxy { command.env("HTTPS_PROXY", proxy); }
-    command
-}
-
 fn check() -> Result<Option<Release>, String> {
-    let command = github_command(&format!("{API_REPOSITORY}/releases?per_page=100"), false);
-    let bytes = run_command(command, Arc::new(AtomicBool::new(false)), Duration::from_secs(45), |input| {
-        let mut bytes = Vec::new();
-        input.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| "无法读取更新信息")?;
-        if bytes.len() > 8 * 1024 * 1024 { return Err("更新信息过大，请查看发布页".into()); }
-        Ok(bytes)
-    })?;
+    check_version(env!("CARGO_PKG_VERSION"))
+}
+
+fn check_version(current: &str) -> Result<Option<Release>, String> {
+    let response = HttpAgent::with_connect_timeout(Duration::from_secs(15))
+        .get(RELEASES_API)
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2026-03-10")
+        .timeout(Duration::from_secs(30))
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(403 | 429, _) => "GitHub 暂时限制了访问，请稍后重试或打开发布页",
+            _ => "无法访问浮岛发布，请检查网络或打开发布页",
+        })?;
+    if response.status() != 200 { return Err("更新信息响应异常，请打开发布页".into()); }
+    let mut bytes = Vec::new();
+    response.into_reader().take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)
+        .map_err(|_| "无法读取更新信息")?;
+    if bytes.len() > 8 * 1024 * 1024 { return Err("更新信息过大，请查看发布页".into()); }
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "更新信息格式异常")?;
-    latest_release(&value, env!("CARGO_PKG_VERSION"))
+    latest_release(&value, current)
+}
+
+fn download_host_allowed(url: &url::Url) -> bool {
+    url.scheme() == "https" && url.username().is_empty() && url.password().is_none() && url.port().is_none()
+        && matches!(url.host_str(), Some("github.com" | "release-assets.githubusercontent.com" | "objects.githubusercontent.com" | "github-releases.githubusercontent.com"))
+}
+
+fn open_package(package: &Package, cancel: &AtomicBool) -> Result<ureq::Response, String> {
+    let client = HttpAgent::streaming();
+    let mut url = url::Url::parse(&package.url).map_err(|_| "更新包地址无效")?;
+    // Resolve proxy rules separately for GitHub and the HTTPS asset host.
+    for _ in 0..4 {
+        if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
+        if !download_host_allowed(&url) { return Err("更新包地址无效，请打开发布页".into()); }
+        let response = client.get(url.as_str()).call().map_err(|_| "无法下载更新包，请检查网络或打开发布页")?;
+        match response.status() {
+            200 => return Ok(response),
+            301 | 302 | 303 | 307 | 308 => {
+                url = response.header("Location").and_then(|location| url.join(location).ok())
+                    .ok_or("更新包跳转地址无效")?;
+            }
+            _ => return Err("更新包响应异常，请打开发布页".into()),
+        }
+    }
+    Err("更新包跳转次数过多，请打开发布页".into())
 }
 
 fn latest_release(value: &serde_json::Value, current: &str) -> Result<Option<Release>, String> {
@@ -397,7 +392,7 @@ fn latest_release(value: &serde_json::Value, current: &str) -> Result<Option<Rel
 fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Release>, String> {
     let Some(tag) = parse_release(value, current)? else { return Ok(None); };
     let number = tag.strip_prefix(TAG_PREFIX).ok_or("更新版本号无效")?;
-    let name = format!("Leidao-v{number}-windows-x64.zip");
+    let name = format!("FloatingIsland-v{number}-windows-x64.zip");
     let expected = format!("{REPOSITORY}/releases/download/{tag}/{name}");
     let package = value["assets"].as_array().and_then(|assets| assets.iter().find(|asset| asset["name"] == name))
         .and_then(|asset| {
@@ -406,27 +401,24 @@ fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Relea
             let asset_id = asset["id"].as_u64()?;
             (asset["browser_download_url"].as_str()? == expected && asset_id > 0 && size > 0 && size <= 200 * 1024 * 1024
                 && hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
-                .then(|| Package { asset_id, size, hash: hash.to_ascii_lowercase() })
+                .then(|| Package { url: expected, size, hash: hash.to_ascii_lowercase() })
         });
     Ok(Some(Release { page: format!("{REPOSITORY}/releases/tag/{tag}"), version: tag,
         notes: value["body"].as_str().unwrap_or("").to_owned(), package }))
 }
 
 fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: Arc<AtomicBool>) -> Result<PathBuf, String> {
-    let package = release.package.as_ref().ok_or("该版本缺少可校验的更新包，请查看发布页")?.clone();
+    let package = release.package.as_ref().ok_or("该版本缺少可校验的更新包，请查看发布页")?;
     let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or("无法找到更新缓存目录")?.join("Leidao/Updates");
     let work = root.join(format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
-        let command = github_command(&format!("{API_REPOSITORY}/releases/assets/{}", package.asset_id), true);
-        let file = work.join("update.zip"); let tx = tx.clone(); let transfer_cancel = cancel.clone();
-        run_command(command, cancel.clone(), Duration::from_secs(300), move |mut input| {
-            let mut output = std::fs::File::create(file).map_err(|_| "无法保存更新包")?;
-            transfer(&mut input, &mut output, &package, &transfer_cancel, |p| { let _ = tx.send(Event::Progress(p)); })
-        })?;
+        let mut input = open_package(package, &cancel)?.into_reader();
+        let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
+        transfer(&mut input, &mut output, package, &cancel, |p| { let _ = tx.send(Event::Progress(p)); })?;
         std::fs::write(work.join("apply.ps1"), concat!("\u{feff}", include_str!("../installer/update.ps1"))).map_err(|_| "无法准备更新程序")?;
         std::fs::write(work.join("version.txt"), release.version.strip_prefix(TAG_PREFIX).ok_or("更新版本号无效")?).map_err(|_| "无法保存更新信息")?;
-        std::fs::write(work.join("hash.txt"), &release.package.as_ref().unwrap().hash).map_err(|_| "无法保存校验信息")?;
+        std::fs::write(work.join("hash.txt"), &package.hash).map_err(|_| "无法保存校验信息")?;
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
         Ok(work.clone())
     })();
@@ -437,9 +429,13 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: Arc<AtomicBool>
 fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, cancel: &AtomicBool, mut progress: impl FnMut(f32)) -> Result<(), String> {
     let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(300);
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用网盘下载")?;
+        if Instant::now() >= deadline { return Err("下载等待超时，请重试或打开发布页".into()); }
+        let read = input.read(&mut buffer);
+        if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
+        let length = read.map_err(|_| "下载中断或等待超时，请重试或打开发布页")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -473,7 +469,7 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
 fn launch_installer(_: &std::path::Path) -> Result<(), String> { Err("仅支持 Windows 应用内更新".into()) }
 
 fn version(value: &str) -> Option<[u64; 3]> {
-    let mut parts = value.strip_prefix('v').unwrap_or(value).split('.');
+    let mut parts = value.split('.');
     let mut numbers = [0; 3];
     for number in &mut numbers {
         let part = parts.next()?;
@@ -557,7 +553,7 @@ mod tests {
             state.automatic_check = automatic;
             let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
             tx.send(Event::Checked(Ok(Some(Release { version: version.into(), notes: String::new(), page: RELEASES.into(),
-                package: Some(Package { asset_id: 1, size: 1, hash: String::new() }) })))).unwrap();
+                package: Some(Package { url: String::new(), size: 1, hash: String::new() }) })))).unwrap();
             state.poll(&egui::Context::default());
             assert_eq!(state.dialog_open, expected); assert_eq!(state.focus_requested, expected);
             assert!(state.rx.is_none()); assert!(state.cancel.is_none()); assert_eq!(state.progress, 0.0);
@@ -577,12 +573,15 @@ mod tests {
     }
 
     #[test]
-    fn update_requests_use_configured_proxy() {
-        let command = github_command_with_proxy("repos/example/test/releases", false, Some("http://127.0.0.1:8800"));
-        assert!(command.get_envs().any(|(key, value)|
-            key == "HTTPS_PROXY" && value == Some(std::ffi::OsStr::new("http://127.0.0.1:8800"))));
-        assert!(github_command_with_proxy("repos/example/test/releases", false, None)
-            .get_envs().all(|(key, _)| key != "HTTPS_PROXY"));
+    fn download_accepts_only_https_github_asset_hosts() {
+        for valid in ["https://github.com/lei0620/FloatingIsland/releases/download/v1.0.0/asset.zip",
+            "https://release-assets.githubusercontent.com/asset", "https://objects.githubusercontent.com/asset"] {
+            assert!(download_host_allowed(&url::Url::parse(valid).unwrap()));
+        }
+        for invalid in ["http://github.com/file", "https://github.com.evil.invalid/file",
+            "https://github.com:81/file", "https://token@github.com/file", "https://example.invalid/file"] {
+            assert!(!download_host_allowed(&url::Url::parse(invalid).unwrap()));
+        }
     }
 
     fn release(tag: &str) -> serde_json::Value {
@@ -590,67 +589,41 @@ mod tests {
     }
     #[test]
     fn only_fork_stable_releases_are_selected_numerically() {
-        let mut draft = release("leidao-v99.0.0"); draft["draft"] = true.into();
-        let mut preview = release("leidao-v98.0.0"); preview["prerelease"] = true.into();
-        let value = serde_json::json!([release("v99.0.0"), draft, preview, release("leidao-v0.6.2"), release("leidao-v0.6.11")]);
-        assert_eq!(latest_release(&value, "0.6.3").unwrap().unwrap().version, "leidao-v0.6.11");
+        let mut draft = release("v99.0.0"); draft["draft"] = true.into();
+        let mut preview = release("v98.0.0"); preview["prerelease"] = true.into();
+        let value = serde_json::json!([release("leidao-v99.0.0"), draft, preview, release("v0.6.2"), release("v0.6.11")]);
+        assert_eq!(latest_release(&value, "0.6.3").unwrap().unwrap().version, "v0.6.11");
         assert!(latest_release(&value, "0.6.11").unwrap().is_none());
         assert!(latest_release(&serde_json::json!([]), "0.6.3").unwrap_err().contains("尚未发布"));
-        assert!(parse_release(&release("v99.0.0"), "0.6.3").is_err());
-    }
-
-    #[test]
-    #[ignore = "仅供子进程超时与取消回归调用"]
-    fn command_output_fixture() {
-        std::thread::sleep(Duration::from_millis(100));
-        println!("leidao-command-fixture");
-        if std::env::var_os("LEIDAO_FIXTURE_FAIL").is_some() { panic!("fixture failure"); }
-    }
-
-    #[test]
-    fn cli_transport_handles_output_timeout_cancel_and_failure() {
-        let command = || {
-            let mut c = std::process::Command::new(std::env::current_exe().unwrap());
-            c.args(["--exact", "updates::tests::command_output_fixture", "--ignored", "--nocapture"]); c
-        };
-        let read = |mut input: std::process::ChildStdout| {
-            let mut bytes = Vec::new(); input.read_to_end(&mut bytes).map_err(|_| "read error".to_owned())?; Ok(bytes)
-        };
-        let result = run_command(command(), Arc::new(AtomicBool::new(false)), Duration::from_secs(5), read).unwrap();
-        assert!(String::from_utf8_lossy(&result).contains("leidao-command-fixture"));
-        assert!(run_command(command(), Arc::new(AtomicBool::new(false)), Duration::from_millis(30), read).unwrap_err().contains("超时"));
-        assert!(run_command(command(), Arc::new(AtomicBool::new(true)), Duration::from_secs(5), read).unwrap_err().contains("取消"));
-        let mut failed = command(); failed.env("LEIDAO_FIXTURE_FAIL", "1");
-        let error = run_command(failed, Arc::new(AtomicBool::new(false)), Duration::from_secs(5), read).unwrap_err();
-        assert!(error.contains("无法访问")); assert!(!error.contains("fixture failure"));
+        assert!(parse_release(&release("leidao-v99.0.0"), "0.6.3").is_err());
     }
 
     #[test]
     fn compares_versions_numerically_and_never_downgrades() {
-        for tag in ["leidao-v0.6.40", "leidao-v0.10.0", "leidao-v1.0.0"] {
+        for tag in ["v0.6.40", "v0.10.0", "v1.0.0"] {
             assert_eq!(parse_release(&release(tag), "0.6.39"), Ok(Some(tag.into())));
         }
-        for tag in ["leidao-v0.6.39", "leidao-v0.6.9", "leidao-v0.5.99"] {
+        for tag in ["v0.6.39", "v0.6.9", "v0.5.99"] {
             assert_eq!(parse_release(&release(tag), "0.6.39"), Ok(None));
         }
     }
     #[test]
     fn rejects_invalid_and_unpublished_releases() {
-        for tag in ["", "latest", "leidao-v1.0", "leidao-v1.0.0.1", "leidao-v1.0.0-beta", "v+1.0.0"] {
+        for tag in ["", "latest", "vv1.0.0", "v1.0", "v1.0.0.1", "v1.0.0-beta", "v+1.0.0"] {
             assert!(parse_release(&release(tag), "0.6.39").is_err());
         }
         for field in ["draft", "prerelease"] {
-            let mut value = release("leidao-v1.0.0"); value[field] = true.into();
+            let mut value = release("v1.0.0"); value[field] = true.into();
             assert!(parse_release(&value, "0.6.39").is_err());
         }
         assert!(parse_release(&serde_json::json!({}), "0.6.39").is_err());
     }
     #[test]
     fn only_matching_verified_windows_package_can_install() {
-        let mut value = release("leidao-v0.6.40");
+        let mut value = release("v0.6.40");
         value["body"] = "更新说明".into();
-        value["assets"] = serde_json::json!([{"name":"Leidao-v0.6.40-windows-x64.zip",
-            "browser_download_url":format!("{REPOSITORY}/releases/download/leidao-v0.6.40/Leidao-v0.6.40-windows-x64.zip"),
+        value["assets"] = serde_json::json!([{"name":"FloatingIsland-v0.6.40-windows-x64.zip",
+            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/FloatingIsland-v0.6.40-windows-x64.zip"),
             "id":123,"size":123,"digest":format!("sha256:{}", "a".repeat(64))}]);
         let parsed = release_info(&value, "0.6.39").unwrap().unwrap();
         assert!(parsed.package.is_some()); assert_eq!(parsed.notes, "更新说明");
@@ -663,7 +636,7 @@ mod tests {
     #[test]
     fn download_rejects_truncation_corruption_excess_and_cancellation() {
         let data = b"verified update";
-        let package = Package { asset_id: 1, size: data.len() as u64,
+        let package = Package { url: String::new(), size: data.len() as u64,
             hash: ring::digest::digest(&ring::digest::SHA256, data).as_ref().iter().map(|b|format!("{b:02x}")).collect() };
         let cancel = AtomicBool::new(false); let mut output = Vec::new(); let mut progress = 0.0;
         transfer(&mut &data[..], &mut output, &package, &cancel, |value| progress = value).unwrap();
@@ -676,7 +649,15 @@ mod tests {
     }
     #[test]
     #[ignore = "需要连接 GitHub"]
-    fn live_update_check() { if let Err(error) = check() { assert!(error.contains("尚未发布"), "{error}"); } }
+    fn live_update_check() {
+        let release = check_version("0.6.66").expect("查询浮岛公开更新").expect("有可用公开更新");
+        let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(version(release.version.trim_start_matches('v')) >= version(current.trim_start_matches('v')));
+        let package = release.package.expect("GitHub 提供经过校验的 ZIP");
+        let cancel = AtomicBool::new(false);
+        let mut response = open_package(&package, &cancel).expect("无需登录可下载公开资产").into_reader();
+        transfer(&mut response, &mut std::io::sink(), &package, &cancel, |_| {}).expect("ZIP 大小和 SHA-256 均匹配");
+    }
 
     #[test]
     fn background_result_and_disconnect_allow_retry() {
@@ -717,7 +698,7 @@ mod tests {
     #[test]
     fn only_a_new_release_opens_the_update_dialog() {
         for result in [Ok(None), Err("网络失败".into()), Ok(Some(Release {
-            version: "leidao-v0.6.40".into(), notes: String::new(), page: RELEASES.into(), package: None,
+            version: "v0.6.40".into(), notes: String::new(), page: RELEASES.into(), package: None,
         }))] {
             let expected = matches!(&result, Ok(Some(_)));
             let mut state = State::default();
@@ -732,7 +713,7 @@ mod tests {
     #[test]
     fn dismissing_update_dialog_cancels_download_and_keeps_release_available() {
         let mut state = State::default(); state.dialog_open = true;
-        state.result = Some(Ok(Some(Release { version: "leidao-v0.6.40".into(), notes: String::new(), page: RELEASES.into(), package: None })));
+        state.result = Some(Ok(Some(Release { version: "v0.6.40".into(), notes: String::new(), page: RELEASES.into(), package: None })));
         let cancel = Arc::new(AtomicBool::new(false)); state.cancel = Some(cancel.clone());
         state.dismiss();
         assert!(!state.dialog_open); assert!(cancel.load(Ordering::Relaxed));
@@ -748,9 +729,9 @@ mod tests {
         std::env::set_var("DAOZAI_DATA_DIR", dest.join("data"));
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
-        app.updates.result = Some(Ok(Some(Release { version: "leidao-v0.6.65".into(),
-            notes: "- 仅检测 Leidao 自己的正式版本\n- 私有仓库访问沿用本机授权\n- 校验、备份并同步更新两个程序入口".into(), page: RELEASES.into(),
-            package: Some(Package { asset_id: 1, size: 100, hash: String::new() }) })));
+        app.updates.result = Some(Ok(Some(Release { version: "v0.6.65".into(),
+            notes: "- 仅检测浮岛公开仓库的正式版本\n- 检查与下载无需登录 GitHub\n- 校验、备份并同步更新两个程序入口".into(), page: RELEASES.into(),
+            package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
         app.settings_open = false;

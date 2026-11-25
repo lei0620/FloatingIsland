@@ -26,10 +26,7 @@ pub(crate) mod api;
 pub(crate) mod kiro;
 #[path="native_auth.rs"]
 mod native_auth;
-#[path="quota_http.rs"]
-mod http;
-use http::{HttpAgent, HttpClient};
-pub(crate) fn proxy_for_url(url: &str) -> Option<String> { http::system_proxy(url) }
+use crate::quota_http::{self as http, HttpAgent, HttpClient};
 
 pub struct Discovery {pub added:usize,pub notes:Vec<String>}
 impl Discovery {
